@@ -1,154 +1,273 @@
 name: RTOS2 Validation
-
-on:
-  workflow_dispatch:
-  pull_request:
-  push:
-    branches: [main]
-
+'on':
+  workflow_dispatch: null
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
-
+  cancel-in-progress: 'true'
 env:
   CMSIS_PACK_ROOT: ${{ github.workspace }}/.packs
   ARM_UBL_ACTIVATION_CODE: ${{ secrets.ARM_UBL_ACTIVATION_CODE }}
   IAR_LMS_BEARER_TOKEN: ${{ secrets.IAR_LMS_BEARER_TOKEN }}
-
 jobs:
   build-and-run:
     strategy:
-      fail-fast: true
+      fail-fast: false
       matrix:
-        compiler: [AC6, GCC, Clang, IAR]
-        rtos: [RTX5, FreeRTOS]
-
+        compiler:
+        - AC6
+        - GCC
+        - Clang
+        - IAR
+        rtos:
+        - RTX5
+        - FreeRTOS
     runs-on: ubuntu-24.04
-
     steps:
-      - name: Checkout CMSIS-RTOS2_Validation
-        uses: actions/checkout@v7
-        with:
-          path: CMSIS-RTOS2_Validation
+    - name: Checkout CMSIS-RTOS2_Validation
+      uses: actions/checkout@v7
+      with:
+        path: CMSIS-RTOS2_Validation
+        repository: Evagan2018/CMSIS-RTOS2_Validation
+        ref: cmsis-pack-6.4.0-test-20261013-083944
+    - name: Checkout CMSIS_6
+      uses: actions/checkout@v7
+      with:
+        repository: ARM-software/CMSIS_6
+        path: CMSIS_6
+        ref: d4a772e65df07a79ffe69c169a72d9bde4e5e7a6
+    - name: Checkout CMSIS-RTX
+      uses: actions/checkout@v7
+      with:
+        repository: ARM-software/CMSIS-RTX
+        path: CMSIS-RTX
+    - name: Checkout Cortex_DFP
+      uses: actions/checkout@v7
+      with:
+        repository: ARM-software/Cortex_DFP
+        path: Cortex_DFP
+    - name: Checkout CMSIS-FreeRTOS
+      uses: actions/checkout@v7
+      with:
+        repository: ARM-software/CMSIS-FreeRTOS
+        path: CMSIS-FreeRTOS
+        ref: c3e5dc3c4531f02f47ed54cd05df0b3e16465155
+    - name: Setup Python
+      uses: actions/setup-python@v7
+      with:
+        python-version: '3.14'
+        cache: pip
+    - name: Python requirements
+      run: |
+        pip install -r ./CMSIS-RTOS2_Validation/Project/requirements.txt
+    - name: Install tools
+      uses: ARM-software/cmsis-actions/vcpkg@v1
+      with:
+        config: CMSIS-RTOS2_Validation/.ci/vcpkg-configuration.json
+    - name: Activate Arm tool license
+      uses: ARM-software/cmsis-actions/armlm@v1
+      with:
+        code: ${{ env.ARM_UBL_ACTIVATION_CODE }}
+    - name: Register local packs
+      run: |
+        cpackget init https://www.keil.com/pack/index.pidx
+        cpackget rm ARM::CMSIS ARM::Cortex_DFP ARM::CMSIS-RTX ARM::CMSIS-FreeRTOS || echo "Ok"
+        cpackget add ARM::CMSIS@6.4.0 --agree-embedded-license
+        cpackget add ./CMSIS-RTX/ARM.CMSIS-RTX.pdsc
+        cpackget add ./CMSIS-FreeRTOS/ARM.CMSIS-FreeRTOS.pdsc
+        cpackget add ./Cortex_DFP/ARM.Cortex_DFP.pdsc
+    - uses: ammaraskar/gcc-problem-matcher@master
+      if: matrix.compiler == 'GCC'
+    - name: Initialize CodeQL
+      if: matrix.compiler == 'GCC'
+      uses: github/codeql-action/init@v4.37.4
+      with:
+        languages: c-cpp
+        queries: security-and-quality
+    - name: Install CMSIS 6.4.0 qualification probe
+      shell: bash
+      working-directory: ${{ github.workspace }}
+      run: |
+        mkdir -p "$RUNNER_TEMP/cmsis-pack-test"
+        cat > "$RUNNER_TEMP/cmsis-pack-test/probe.py" <<'CMSIS_PROBE_EOF'
+        #!/usr/bin/env python3
+        """Ephemeral runner instrumentation for the CMSIS 6.4.0 campaign (stdlib only)."""
+        import json, os, re, shutil, subprocess, sys, time
+        from pathlib import Path
 
-      - name: Checkout CMSIS_6
-        uses: actions/checkout@v7
-        with:
-          repository: ARM-software/CMSIS_6
-          path: CMSIS_6
+        TARGET = 'ARM::CMSIS@6.4.0'
+        HOME = Path(os.environ.get('RUNNER_TEMP', '.')) / 'cmsis-pack-test'
+        WORKSPACE = Path(os.environ.get('GITHUB_WORKSPACE', '.')).resolve()
+        SKIP = {'.git', '.packs', '.Download', 'node_modules', 'boost_1_84_0'}
 
-      - name: Checkout CMSIS-RTX
-        uses: actions/checkout@v7
-        with:
-          repository: ARM-software/CMSIS-RTX
-          path: CMSIS-RTX
+        def files(root=WORKSPACE):
+            for base, dirs, names in os.walk(root):
+                dirs[:] = [d for d in dirs if d not in SKIP and not Path(base, d).is_symlink()]
+                for name in names:
+                    if name.endswith(('.yml', '.yaml')):
+                        yield Path(base, name)
 
-      - name: Checkout Cortex_DFP
-        uses: actions/checkout@v7
-        with:
-          repository: ARM-software/Cortex_DFP
-          path: Cortex_DFP
+        def pin(text, lock=False):
+            lines = text.splitlines(keepends=True)
+            result = []
+            i = 0
+            key = 'resolved-pack' if lock else 'pack'
+            pattern = re.compile(r'^(\s*)-\s+' + key + r':\s*[\"\x27]?ARM::CMSIS(?=[@\s\"\x27]|$)', re.I)
+            while i < len(lines):
+                match = pattern.match(lines[i])
+                if not match:
+                    result.append(lines[i]); i += 1; continue
+                indent = len(match[1])
+                j = i + 1
+                while j < len(lines):
+                    line = lines[j]
+                    if line.strip() and not line.lstrip().startswith('#') and len(line) - len(line.lstrip()) <= indent:
+                        break
+                    j += 1
+                if not lock:
+                    result.append(match[1] + '- pack: ' + TARGET + '\n')
+                    result.extend(x for x in lines[i+1:j] if not re.match(r'^\s+path:', x))
+                i = j
+            return ''.join(result)
 
-      - name: Checkout CMSIS-FreeRTOS
-        uses: actions/checkout@v7
-        with:
-          repository: ARM-software/CMSIS-FreeRTOS
-          path: CMSIS-FreeRTOS
+        def prepare():
+            changed = []
+            for path in files():
+                if not path.name.endswith(('.csolution.yml', '.cproject.yml', '.clayer.yml', '.cbuild-pack.yml')):
+                    continue
+                old = path.read_text(encoding='utf-8-sig')
+                new = pin(old, path.name.endswith('.cbuild-pack.yml'))
+                if old != new:
+                    path.write_text(new, encoding='utf-8')
+                    changed.append(str(path.relative_to(WORKSPACE)))
+            return changed
 
-      - name: Setup Python
-        uses: actions/setup-python@v7
-        with:
-          python-version: '3.14'
-          cache: 'pip'
+        def emit(record):
+            HOME.mkdir(parents=True, exist_ok=True)
+            with (HOME/'evidence.jsonl').open('a', encoding='utf-8') as f:
+                f.write(json.dumps(record) + '\n')
+            print('CMSIS_PACK_TEST_RESULT ' + json.dumps(record), flush=True)
 
-      - name: Python requirements
-        run: |
-          pip install -r ./CMSIS-RTOS2_Validation/Project/requirements.txt
+        def wrapper():
+            args = sys.argv[1:]
+            real = (HOME/'real-cbuild.txt').read_text().strip()
+            if not any('.csolution.' in a for a in args) or any(a in args for a in ['--help', '--version', 'list', 'clean']):
+                return subprocess.call([real] + args)
+            changed = prepare()
+            before = {str(p): p.stat().st_mtime_ns for p in files() if p.name.endswith('.cbuild.yml')}
+            started = time.time()
+            rc = subprocess.call([real] + args)
+            evidence = []
+            for p in files():
+                if not p.name.endswith('.cbuild.yml') or before.get(str(p)) == p.stat().st_mtime_ns:
+                    continue
+                text = p.read_text(encoding='utf-8-sig')
+                packs = sorted(set(re.findall(r'(?:pack|from-pack):\s*[\"\x27]?(ARM::CMSIS@[^\s\"\x27]+)', text)))
+                if packs:
+                    ctx = re.search(r'^\s*context:\s*(.+)$', text, re.M)
+                    evidence.append({'file':str(p.relative_to(WORKSPACE)), 'context':ctx[1].strip() if ctx else p.name,
+                                     'packs':packs, 'verified':packs == [TARGET]})
+            build_action = not any(a in args for a in ['setup', 'convert'])
+            good = bool(evidence) and all(e['verified'] for e in evidence)
+            record = {'kind':'build' if build_action else 'setup','cwd':str(Path.cwd()),'args':args,
+                      'returncode':rc,'version_verified':good,'contexts':evidence,'patched_inputs':changed,
+                      'seconds':round(time.time()-started,2)}
+            emit(record)
+            # Preserve the builder return code. The always-run final check separately rejects
+            # missing/wrong evidence and failures swallowed by upstream scripts.
+            return rc
 
-      - name: Install tools
-        uses: ARM-software/cmsis-actions/vcpkg@v1
-        with:
-          config: "CMSIS-RTOS2_Validation/.ci/vcpkg-configuration.json"
+        def install():
+            HOME.mkdir(parents=True, exist_ok=True)
+            prepare()
+            bindir = HOME/'bin'; bindir.mkdir(exist_ok=True)
+            if not (HOME/'real-cbuild.txt').exists():
+                real = shutil.which('cbuild')
+                if not real:
+                    raise RuntimeError('cbuild unavailable at qualification setup')
+                (HOME/'real-cbuild.txt').write_text(real)
+                wrapper_path = bindir/'cbuild'
+                wrapper_path.write_text('#!/bin/sh\nexec python3 "' + str(HOME/'probe.py') + '" "$@"\n')
+                wrapper_path.chmod(0o755)
+                with open(os.environ['GITHUB_PATH'], 'a') as f:
+                    f.write(str(bindir)+'\n')
+            print('CMSIS_PACK_TEST_SETUP target=' + TARGET, flush=True)
 
-      - name: Activate Arm tool license
-        uses: ARM-software/cmsis-actions/armlm@v1
-        with:
-          code: ${{ env.ARM_UBL_ACTIVATION_CODE }}
+        def finish():
+            path = HOME/'evidence.jsonl'
+            if not path.exists():
+                print('::error::No instrumented cbuild invocation reached; CMSIS 6.4.0 not verified')
+                return 1
+            records = [json.loads(line) for line in path.read_text().splitlines() if line]
+            for r in records:
+                print('CMSIS_PACK_TEST_FINAL ' + json.dumps(r), flush=True)
+            builds = [r for r in records if r['kind']=='build']
+            good = bool(builds) and all(r['returncode']==0 and r['version_verified'] for r in builds)
+            print('CMSIS_PACK_TEST_GATE ' + json.dumps({'passed':good,'build_invocations':len(builds)}))
+            return 0 if good else 1
 
-      - name: Register local packs
-        run: |
-          cpackget init https://www.keil.com/pack/index.pidx
-          cpackget rm ARM::CMSIS ARM::Cortex_DFP ARM::CMSIS-RTX ARM::CMSIS-FreeRTOS || echo "Ok"
-          cpackget add ./CMSIS_6/ARM.CMSIS.pdsc
-          cpackget add ./CMSIS-RTX/ARM.CMSIS-RTX.pdsc
-          cpackget add ./CMSIS-FreeRTOS/ARM.CMSIS-FreeRTOS.pdsc
-          cpackget add ./Cortex_DFP/ARM.Cortex_DFP.pdsc
+        if __name__ == '__main__':
+            if sys.argv[1:] == ['--probe-install']:
+                install()
+            elif sys.argv[1:] == ['--probe-finish']:
+                sys.exit(finish())
+            else:
+                sys.exit(wrapper())
 
-      - uses: ammaraskar/gcc-problem-matcher@master
-        if: matrix.compiler == 'GCC'
-
-      - name: Initialize CodeQL
-        if: matrix.compiler == 'GCC'
-        uses: github/codeql-action/init@v4.37.4
-        with:
-          languages: c-cpp
-          queries: security-and-quality
-
-      - name: Build
-        working-directory: ./CMSIS-RTOS2_Validation/Project
-        run: |
-          echo "Build test projects ..."
-          ./build.py --verbose -r ${{ matrix.rtos }} -c ${{ matrix.compiler }} build || echo "::warning::=== Some configurations failed to build! ==="
-
-      - name: Execute
-        if: env.ARM_UBL_ACTIVATION_CODE
-        working-directory: ./CMSIS-RTOS2_Validation/Project
-        run: |
-          echo "Run test projects ..."
-          ./build.py --verbose -r ${{ matrix.rtos }} -c ${{ matrix.compiler }} run || echo "::warning::==== Some configurations failed to run! ==="
-
-      - name: Deactivate Arm tool license
-        if: always()
-        run: |
-          if [[ -n "${{ env.ARM_UBL_ACTIVATION_CODE }}" ]]; then
-            armlm deactivate --code ${{ env.ARM_UBL_ACTIVATION_CODE }}
-          else
-            armlm deactivate --product KEMDK-COM0
-          fi
-
-      - name: Perform CodeQL Analysis
-        if: matrix.compiler == 'GCC'
-        uses: github/codeql-action/analyze@v4.37.4
-
-      - name: Upload Test Reports
-        if: ${{ !cancelled() && env.ARM_UBL_ACTIVATION_CODE }}
-        uses: actions/upload-artifact@v7
-        with:
-          name: test-results-${{ matrix.rtos }}-${{ matrix.compiler }}
-          path: ./CMSIS-RTOS2_Validation/Project/*.junit
-
-
+        CMSIS_PROBE_EOF
+        python3 "$RUNNER_TEMP/cmsis-pack-test/probe.py" --probe-install
+    - name: Build
+      working-directory: ./CMSIS-RTOS2_Validation/Project
+      run: |
+        echo "Build test projects ..."
+        ./build.py --verbose -r ${{ matrix.rtos }} -c ${{ matrix.compiler }} build || echo "::warning::=== Some configurations failed to build! ==="
+    - name: Execute
+      if: env.ARM_UBL_ACTIVATION_CODE
+      working-directory: ./CMSIS-RTOS2_Validation/Project
+      run: |
+        echo "Run test projects ..."
+        ./build.py --verbose -r ${{ matrix.rtos }} -c ${{ matrix.compiler }} run || echo "::warning::==== Some configurations failed to run! ==="
+    - name: Deactivate Arm tool license
+      if: always()
+      run: |
+        if [[ -n "${{ env.ARM_UBL_ACTIVATION_CODE }}" ]]; then
+          armlm deactivate --code ${{ env.ARM_UBL_ACTIVATION_CODE }}
+        else
+          armlm deactivate --product KEMDK-COM0
+        fi
+    - name: Perform CodeQL Analysis
+      if: matrix.compiler == 'GCC'
+      uses: github/codeql-action/analyze@v4.37.4
+    - name: Upload Test Reports
+      if: ${{ !cancelled() && env.ARM_UBL_ACTIVATION_CODE }}
+      uses: actions/upload-artifact@v7
+      with:
+        name: test-results-${{ matrix.rtos }}-${{ matrix.compiler }}
+        path: ./CMSIS-RTOS2_Validation/Project/*.junit
+    - name: Verify CMSIS 6.4.0 build evidence
+      if: always()
+      shell: bash
+      working-directory: ${{ github.workspace }}
+      run: python3 "$RUNNER_TEMP/cmsis-pack-test/probe.py" --probe-finish
   publish-test-results:
-    needs: [build-and-run]
+    needs:
+    - build-and-run
     runs-on: ubuntu-24.04
     if: github.event_name == 'pull_request'
-
     env:
       GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
     steps:
-      - name: Download Test Reports
-        if: ${{ env.ARM_UBL_ACTIVATION_CODE }}
-        uses: actions/download-artifact@v8
-        with:
-          path: artifacts
-
-      - name: Publish Test Results
-        if: ${{ env.ARM_UBL_ACTIVATION_CODE && env.GITHUB_TOKEN }}
-        uses: EnricoMi/publish-unit-test-result-action@v2
-        with:
-          commit: ${{ github.event.workflow_run.head_sha }}
-          event_file: ${{ github.event_path }}
-          report_individual_runs: true
-          event_name: ${{ github.event.workflow_run.event }}
-          files: "artifacts/**/*.junit"
+    - name: Download Test Reports
+      if: ${{ env.ARM_UBL_ACTIVATION_CODE }}
+      uses: actions/download-artifact@v8
+      with:
+        path: artifacts
+    - name: Publish Test Results
+      if: ${{ env.ARM_UBL_ACTIVATION_CODE && env.GITHUB_TOKEN }}
+      uses: EnricoMi/publish-unit-test-result-action@v2
+      with:
+        commit: ${{ github.event.workflow_run.head_sha }}
+        event_file: ${{ github.event_path }}
+        report_individual_runs: 'true'
+        event_name: ${{ github.event.workflow_run.event }}
+        files: artifacts/**/*.junit
+run-name: CMSIS 6.4.0 qualification - cmsis_rv2.yml

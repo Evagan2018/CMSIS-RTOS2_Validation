@@ -23,7 +23,7 @@ solution:
         - --semihosting
 
   packs:
-    - pack: ARM::CMSIS
+    - pack: ARM::CMSIS@6.4.0
     - pack: ARM::CMSIS-RTOS2_Validation
       path: ../
 
