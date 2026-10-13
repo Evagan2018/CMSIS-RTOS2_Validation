@@ -3,7 +3,7 @@ name: RTOS2 Validation
   workflow_dispatch: null
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: 'true'
+  cancel-in-progress: true
 env:
   CMSIS_PACK_ROOT: ${{ github.workspace }}/.packs
   ARM_UBL_ACTIVATION_CODE: ${{ secrets.ARM_UBL_ACTIVATION_CODE }}
@@ -267,7 +267,7 @@ jobs:
       with:
         commit: ${{ github.event.workflow_run.head_sha }}
         event_file: ${{ github.event_path }}
-        report_individual_runs: 'true'
+        report_individual_runs: true
         event_name: ${{ github.event.workflow_run.event }}
         files: artifacts/**/*.junit
 run-name: CMSIS 6.4.0 qualification - cmsis_rv2.yml
