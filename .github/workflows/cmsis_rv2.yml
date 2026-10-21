@@ -59,10 +59,6 @@ jobs:
       uses: ARM-software/cmsis-actions/vcpkg@v1
       with:
         config: CMSIS-RTOS2_Validation/.ci/vcpkg-configuration.json
-    - name: Activate Arm tool license
-      uses: ARM-software/cmsis-actions/armlm@v1
-      with:
-        code: ${{ env.ARM_UBL_ACTIVATION_CODE }}
     - name: Register local packs
       run: |
         cpackget init https://www.keil.com/pack/index.pidx
@@ -188,14 +184,6 @@ jobs:
       run: |
         echo "Run test projects ..."
         ./build.py --verbose -r ${{ matrix.rtos }} -c ${{ matrix.compiler }} run || echo "::warning::==== Some configurations failed to run! ==="
-    - name: Deactivate Arm tool license
-      if: always()
-      run: |
-        if [[ -n "${{ env.ARM_UBL_ACTIVATION_CODE }}" ]]; then
-          armlm deactivate --code ${{ env.ARM_UBL_ACTIVATION_CODE }}
-        else
-          armlm deactivate --product KEMDK-COM0
-        fi
     - name: Upload Test Reports
       if: ${{ !cancelled() && env.ARM_UBL_ACTIVATION_CODE }}
       uses: actions/upload-artifact@v7
